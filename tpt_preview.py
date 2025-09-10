@@ -341,7 +341,7 @@ for key, entry in list(st.session_state.files.items()):
             col = cols[i % 5]
             with col:
                 if i < len(entry.thumbs):
-                    st.image(entry.thumbs[i], use_column_width=True)
+                    st.image(entry.thumbs[i], use_container_width=True)
                 label = f"Pg {i+1}"
                 key_cb = f"cb_{key}_{i+1}"
                 current = (i + 1) in entry.selected_pages
@@ -454,4 +454,3 @@ if st.button("🚀 Generate Previews", type="primary"):
 
     if not out_list and not (merge_all and pages_map):
         st.warning("No previews generated. Check your selections.")
-
