@@ -209,6 +209,35 @@ def make_key(name: str, data: bytes) -> str:
 def ensure_state():
     if "files" not in st.session_state:
         st.session_state.files = {}
+    if "generated" not in st.session_state:
+        # Holds cached outputs keyed by a config signature.
+        st.session_state.generated = None
+
+def current_config_signature() -> str:
+    """Build a signature for heavy-output-affecting inputs.
+    Excludes purely packaging options like suffix, make_zip, and merge toggles.
+    """
+    parts: List[str] = []
+    # Per-file: content identity + selected pages
+    for key, entry in sorted(st.session_state.files.items(), key=lambda kv: kv[0]):
+        content_key = make_key(entry.name, entry.bytes_pdf)
+        sel = ",".join(map(str, entry.selected_pages))
+        parts.append(f"{content_key}:{sel}")
+    # Watermark + raster settings from the latest widget values if they exist in session
+    # Fallback defaults mirror widget defaults
+    wm_text_val = st.session_state.get("wm_text", "Preview - TrueNorthTeachingTools")
+    wm_opacity_val = float(st.session_state.get("wm_opacity", 0.50))
+    wm_angle_val = int(st.session_state.get("wm_angle", 45))
+    wm_font_val = int(st.session_state.get("wm_font", 92))
+    wm_coverage_val = float(st.session_state.get("wm_coverage", 0.80))
+    dpi_val = int(st.session_state.get("dpi", 200))
+    parts.append(f"WM:{wm_text_val}|{wm_opacity_val}|{wm_angle_val}|{wm_font_val}|{wm_coverage_val}|DPI:{dpi_val}")
+    return "|".join(parts)
+
+def set_widget_keys():
+    """Ensure watermark/raster widgets store values in session_state with fixed keys."""
+    # No-op placeholder to document intent; widgets below specify key=...
+    return
 
 # ---------------------------- App ----------------------------
 
@@ -356,33 +385,30 @@ for key, entry in list(st.session_state.files.items()):
 st.subheader("Watermark")
 wm_cols = st.columns(6)
 with wm_cols[0]:
-    wm_text = st.text_input("Text", value="Preview - TrueNorthTeachingTools")
+    wm_text = st.text_input("Text", value="Preview - TrueNorthTeachingTools", key="wm_text")
 with wm_cols[1]:
-    wm_opacity = st.slider("Opacity", 0.10, 0.90, 0.50, 0.01)
+    wm_opacity = st.slider("Opacity", 0.10, 0.90, 0.50, 0.01, key="wm_opacity")
 with wm_cols[2]:
-    wm_angle = st.number_input("Angle", -180, 180, 45, 1)
+    wm_angle = st.number_input("Angle", -180, 180, 45, 1, key="wm_angle")
 with wm_cols[3]:
-    wm_font = st.number_input("Font size", 24, 200, 92, 2)
+    wm_font = st.number_input("Font size", 24, 200, 92, 2, key="wm_font")
 with wm_cols[4]:
-    wm_coverage = st.slider("Coverage (dense ↔︎ light)", 0.20, 1.00, 0.80, 0.01)
+    wm_coverage = st.slider("Coverage (dense ↔︎ light)", 0.20, 1.00, 0.80, 0.01, key="wm_coverage")
 with wm_cols[5]:
-    dpi = st.selectbox("Raster DPI", options=[100, 120, 144, 150, 180, 200, 240, 300], index=5, help="Higher = crisper & larger file")
+    dpi = st.selectbox("Raster DPI", options=[100, 120, 144, 150, 180, 200, 240, 300], index=5, key="dpi", help="Higher = crisper & larger file")
 
 # Export settings
 st.subheader("Export")
-suffix = st.text_input("Output suffix", value="_preview")
-make_zip = st.checkbox("Also create a ZIP with all outputs", value=True)
-skip_empty = st.checkbox("Skip files with no selected pages", value=True)
-merge_all = st.checkbox("🔗 Also merge all generated previews into a single PDF", value=True)
-merge_order = st.selectbox("Merged order", options=["By file name (A→Z)", "By file size (small→large)"], index=0)
+suffix = st.text_input("Output suffix", value="_preview", key="suffix")
+make_zip = st.checkbox("Also create a ZIP with all outputs", value=True, key="make_zip")
+skip_empty = st.checkbox("Skip files with no selected pages", value=True, key="skip_empty")
+merge_all = st.checkbox("🔗 Also merge all generated previews into a single PDF", value=True, key="merge_all")
+merge_order = st.selectbox("Merged order", options=["By file name (A→Z)", "By file size (small→large)"], index=0, key="merge_order")
 
-if st.button("🚀 Generate Previews", type="primary"):
-    out_list: List[Tuple[str, bytes]] = []
-    pages_per_file: Dict[str, List[Image.Image]] = []
-    pages_map: Dict[str, List[Image.Image]] = {}
-
-    zip_buf = io.BytesIO()
-    zf = zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) if make_zip else None
+# Helper to generate heavy outputs and cache them with signature
+def generate_outputs(signature: str):
+    per_file: List[Tuple[str, bytes]] = []  # (base_stem, pdf_bytes) where name will be base_stem + suffix + .pdf
+    pages_map_for_merge: Dict[str, List[Image.Image]] = {}
 
     progress_files = st.progress(0, text="Processing files...")
     total_files = len(st.session_state.files)
@@ -392,10 +418,8 @@ if st.button("🚀 Generate Previews", type="primary"):
         processed += 1
         progress_files.progress(processed / total_files, text=f"Processing {entry.name} ({processed}/{total_files})")
 
-        if not entry.selected_pages:
-            if skip_empty:
-                st.warning(f"Skipped (no pages): {entry.name}")
-                continue
+        if not entry.selected_pages and skip_empty:
+            continue
 
         pages = rasterize_pages_with_watermark(
             entry.bytes_pdf,
@@ -408,49 +432,72 @@ if st.button("🚀 Generate Previews", type="primary"):
             wm_coverage=float(wm_coverage),
         )
         if not pages:
-            st.info(f"No pages generated for {entry.name}.")
             continue
 
         pdf_bytes = images_to_pdf_bytes(pages)
-        base = Path(entry.name).stem  # strip .pdf or .docx
-        out_name = f"{base}{suffix}.pdf"
-        out_list.append((out_name, pdf_bytes))
-        pages_map[out_name] = pages
-        if zf:
-            zf.writestr(out_name, pdf_bytes)
+        base_stem = Path(entry.name).stem  # strip .pdf or .docx
+        per_file.append((base_stem, pdf_bytes))
+        pages_map_for_merge[base_stem] = pages
 
-    if zf:
-        zf.close()
+    # Prepare merged bytes for both orders for reuse without regeneration
+    merged_bytes_by_order = {}
+    if pages_map_for_merge:
+        # Name order
+        items_name = sorted(pages_map_for_merge.items(), key=lambda x: x[0].lower())
+        merged_images_name: List[Image.Image] = []
+        for _, pages in items_name:
+            merged_images_name.extend(pages)
+        merged_bytes_by_order["By file name (A→Z)"] = images_to_pdf_bytes(merged_images_name)
+
+        # Size order
+        name_to_size = {}
+        for k, entry in st.session_state.files.items():
+            name_to_size[Path(entry.name).stem] = entry.size
+        items_size = sorted(pages_map_for_merge.items(), key=lambda kv: name_to_size.get(kv[0], float('inf')))
+        merged_images_size: List[Image.Image] = []
+        for _, pages in items_size:
+            merged_images_size.extend(pages)
+        merged_bytes_by_order["By file size (small→large)"] = images_to_pdf_bytes(merged_images_size)
+
+    st.session_state.generated = {
+        "signature": signature,
+        "per_file": per_file,  # list of (base_stem, pdf_bytes)
+        "merged": merged_bytes_by_order,
+    }
+
+generate_clicked = st.button("🚀 Generate Previews", type="primary")
+signature = current_config_signature()
+
+if generate_clicked or not st.session_state.get("generated") or (st.session_state.generated and st.session_state.generated.get("signature") != signature):
+    if generate_clicked:
+        generate_outputs(signature)
+
+# Render downloads using cached outputs if available and up-to-date
+gen = st.session_state.get("generated")
+if gen and gen.get("per_file"):
+    is_stale = gen.get("signature") != signature
+    if is_stale:
+        st.info("Settings changed since last generation. Regenerate to update outputs.")
+
+    # Per-file download buttons with current suffix
+    for base_stem, data in gen["per_file"]:
+        fname = f"{base_stem}{suffix}.pdf"
+        st.download_button(f"Download {fname}", data=data, file_name=fname, mime="application/pdf", disabled=is_stale)
+
+    # ZIP assembled on the fly so suffix changes don't require regeneration
+    if make_zip and gen["per_file"]:
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for base_stem, data in gen["per_file"]:
+                fname = f"{base_stem}{suffix}.pdf"
+                zf.writestr(fname, data)
         zip_buf.seek(0)
+        st.download_button("⬇️ Download all (ZIP)", data=zip_buf, file_name="tpt_previews.zip", mime="application/zip", disabled=is_stale)
 
-    if make_zip and out_list:
-        st.download_button("⬇️ Download all (ZIP)", data=zip_buf, file_name="tpt_previews.zip", mime="application/zip")
-
-    for name, data in out_list:
-        st.download_button(f"Download {name}", data=data, file_name=name, mime="application/pdf")
-
-    # Build merged PDF if requested
-    if merge_all and pages_map:
-        items = list(pages_map.items())
-        if merge_order == "By file name (A→Z)":
-            items.sort(key=lambda x: x[0].lower())
-        else:
-            # by size of original file name stem
-            name_to_size = {}
-            for k, entry in st.session_state.files.items():
-                base = Path(entry.name).stem
-                name_to_size[base] = entry.size
-            def size_key(item):
-                fname = item[0]
-                base = Path(fname).stem.replace(suffix, "")
-                return name_to_size.get(base, float('inf'))
-            items.sort(key=size_key)
-
-        merged_images: List[Image.Image] = []
-        for fname, pages in items:
-            merged_images.extend(pages)
-        merged_bytes = images_to_pdf_bytes(merged_images)
-        st.download_button("🔗 Download merged_previews.pdf", data=merged_bytes, file_name="merged_previews.pdf", mime="application/pdf")
-
-    if not out_list and not (merge_all and pages_map):
-        st.warning("No previews generated. Check your selections.")
+    # Merged downloads reuse precomputed bytes for both orders
+    if merge_all and gen.get("merged"):
+        merged_bytes = gen["merged"].get(merge_order)
+        if merged_bytes:
+            st.download_button("🔗 Download merged_previews.pdf", data=merged_bytes, file_name="merged_previews.pdf", mime="application/pdf", disabled=is_stale)
+else:
+    st.info("Click 'Generate Previews' to create outputs.")
