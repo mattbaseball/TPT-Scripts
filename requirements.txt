@@ -1,0 +1,4 @@
+streamlit
+pymupdf
+pillow
+docx2pdf
