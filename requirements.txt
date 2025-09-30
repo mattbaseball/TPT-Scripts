@@ -1,4 +1,6 @@
 streamlit
-pymupdf
 pillow
+pymupdf
 docx2pdf
+python-pptx
+pypdf2
