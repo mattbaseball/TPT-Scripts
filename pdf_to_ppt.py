@@ -1,10 +1,10 @@
 import streamlit as st
-from pdf2image import convert_from_path
+import fitz  # PyMuPDF
 from pptx import Presentation
-from pptx.util import Inches, Pt
+from pptx.util import Inches
+from PIL import Image
 import tempfile
 import os
-from PyPDF2 import PdfReader
 
 st.set_page_config(page_title="PDF → PowerPoint Converter", layout="centered")
 
@@ -20,34 +20,34 @@ uploaded_files = st.file_uploader(
 dpi = st.slider("Image DPI (higher = better quality, bigger file)", 100, 400, 200)
 
 def pdf_to_pptx(pdf_path, dpi=200):
-    # Get PDF page size (points = 1/72 inch)
-    reader = PdfReader(pdf_path)
-    first_page = reader.pages[0]
-    width_pt = float(first_page.mediabox.width)
-    height_pt = float(first_page.mediabox.height)
-    
-    # Convert to Inches (pptx uses EMU internally)
-    pdf_width_in = width_pt / 72
-    pdf_height_in = height_pt / 72
+    # Open PDF with PyMuPDF
+    doc = fitz.open(pdf_path)
+    first_page = doc[0]
+    rect = first_page.rect
 
-    # Convert PDF pages to images
-    pages = convert_from_path(pdf_path, dpi=dpi)
+    # Convert PDF page size from points (1/72 in) to inches
+    pdf_width_in = rect.width / 72
+    pdf_height_in = rect.height / 72
 
-    # Create PowerPoint
+    # Create PowerPoint with same proportions
     prs = Presentation()
     prs.slide_width = Inches(pdf_width_in)
     prs.slide_height = Inches(pdf_height_in)
 
-    for page in pages:
+    for page in doc:
+        # Render page to image at desired DPI
+        mat = fitz.Matrix(dpi / 72, dpi / 72)
+        pix = page.get_pixmap(matrix=mat)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+        # Save temp PNG for inserting into slide
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
-            page.save(tmp_img.name, "PNG")
-            img_path = tmp_img.name
+            img.save(tmp_img.name, "PNG")
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
+            slide.shapes.add_picture(tmp_img.name, 0, 0, width=prs.slide_width, height=prs.slide_height)
+            os.remove(tmp_img.name)
 
-        slide = prs.slides.add_slide(prs.slide_layouts[6])
-        slide.shapes.add_picture(img_path, 0, 0, width=prs.slide_width, height=prs.slide_height)
-        os.remove(img_path)
-
-    # Save to temp file
+    # Save PPTX to temp file
     out_pptx = tempfile.NamedTemporaryFile(delete=False, suffix=".pptx")
     prs.save(out_pptx.name)
     return out_pptx.name
